@@ -1,0 +1,526 @@
+---
+title: "Memo: Hours and Earnings"
+author: "Giovanni Righi"
+date: "March 23, 2017"
+output: 
+  pdf_document:
+    fig_caption: true
+references:
+- id: akk
+  title: Trends in U.S. Wage Inequality- Revising the Revisionists
+  author:
+  - family: Autor
+    given: David
+  - family: Katz
+    given: Lawrence
+  - family: Kearney
+    given: Melissa
+  container-title: Rev. of Econ. and Stat.
+  volume: 90
+  issue: 2
+  page: 300-323
+  type: article-journal
+  issued:
+    year: 2008
+    month: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readstata13)
+library(data.table)
+library(magrittr)
+library(rjson)
+library(blsAPI)
+library(feather)
+library(plyr)
+```
+
+
+```{r morg, echo=FALSE, cache=TRUE, message=FALSE}
+setwd("~/Documents/sorkinFig6b/")
+
+unfactor <- function(x) {as.numeric(as.character(x))}
+
+# topcode with and without
+# four variations in hourly earnings
+# how much of variation in earnings is explained by hours worked over the year?
+# write a memo showing questions in CPS -> different ways of doing it -> here's what you get
+
+for(j in 1:4) {
+  
+  source('pull_data_morg.R')
+  
+  if (j == 1) morg.data <- NULL
+  
+  # hourslw: hours last week
+  # uhoure: usual hours
+  # ind80:  3-digit industry code (1980)
+  # paidhre: paid hourly
+  # ernpdh2: paid hourly - second check
+  # earnwke: earnings per week
+  # earnhre: earnings per hour
+  # weight:  final weight x10000                    # used for most, controls for state, sex, race, age
+  # earnwt:  OUTGOING ROTATION WEIGHT               # used to tabulate MORG info like EARNINGS, NILF
+  # cmpwgt:  composited final wiehgt x10000         # used to create BLS published labor force stats
+  # 125a: usual hours allocation flag
+  # 125b: paid by hour allocation flag
+  # 125c: earnings per hour allocation flag
+  # 125d: usual earn per hour allocation flag
+  #   which signify value was changed
+  vars <- c("hourslw", "uhourse", "ind80", "paidhre", "ernpdh2", "earnwke", "earnhre",
+            "weightp", "earnwtp", "cmpwgt",  "earnwt", "I25a", "I25b", "I25c", "I25d")
+  # data.frame(variable = vars, label = varlabels[vars], row.names = NULL)
+  
+  # NOTE: I'm only using paidhre and not ernpdh2, though adding in ernpdh2 would give back 1%
+  
+  # CHECK
+  # # there are 95k observations with hourly earnings:
+  # sum(!is.na(morg$earnhre))
+  # # all of these people state that they are paid hourly:
+  # sum(morg[paidhre == 'Yes', !is.na(earnhre)])
+  # # (but not all "Yes" have a value for hourly earnings)
+  
+  # TOPCODES
+  # # the doc (http://www.nber.org/morg/docs/cpsx.pdf) states that topcode is all values greater than $1923.07 earnings
+  # # last week -- that is $100K/year annualized. But the Jan03 ddf states
+  # #                    9999   MAX VALUE (Subject to topcoding based on the entry in PEERNHRO such 
+  # #                           that PEERNHRO x PEERNHLY < or = 2884.61) 
+  # # that is annualized earnings of 150000. 
+  # # And the doc states that topcodes were inconsistently applied. Let's investigate.
+  # # only .1% of our sample is above the 100K (annualized) threshold:
+  # sum(morg$uhourse * morg$earnhre / 100 > 1923.07, na.rm = T)
+  # # and not all 5 topcoded folks are in that category (some are missing hourslw)
+  # which(morg$earnhre == 9999) %in% which(morg$uhourse * morg$earnhre / 100 > 1923.07)
+  # # it does look like there is some bunching at some points. Here's hourly earnings converted to weekly:
+  # hist(morg[uhourse*earnhre/100 > 1500, uhourse * earnhre / 100], breaks = 150)
+  # # kinda at the $100k annualized threshold:
+  # abline(v = 1923, col = 'red')
+  # # also at the $150k annualized threshold:
+  # abline(v = 2883, col = 'red')
+  # # but also the $125k:
+  # abline(v = 2403, col = 'red')
+  # # so presumably those spikes are just from back-of-the-envelope calculations
+  # # Therefore I'll just consider 9999 as the top code
+  # morg[earnhre == 9999, earnhre := 9999*1.5]
+  # # .... None of this stuff matters because they should be dropped anyway since they are > 2884/35
+  
+  # # weekly earnings are more likely to be topcoded
+  # hist(morg[, earnwke])
+  # abline(v = 2884, col = 'red')
+  morg[earnwke == 2884, earnwke := earnwke*1.5]
+  
+  # DROP extremes
+  morg[earnhre < 375, earnhre := NA]  # $2.80 in 2000 dollars is $3.75 in 2011 dollars
+  morg[earnhre > 2884/35, earnhre := NA]
+  
+  # NOTE! still need to figure out how to drop extreme earnwke <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<,,
+  morg[earnwke == 0, earnwke := NA]
+  
+  # DROP allocated observations
+  morg[I25c == 1, earnhre := NA]
+  morg[I25d == 1, earnwke := NA]
+  
+  # It does *not* say that topcoded weekly earnings (2884) are dropped, probably because 
+  # there are a lot more of these than is relevant for hourly earnings
+  
+  # we drop a whole 2% of our sample if we use last week's hours but ignore usual hours
+  sum(is.na(morg$hourslw) & !is.na(morg$uhourse)) / dim(morg)[1]
+  
+  # ASSIGN hourly wage value
+  if(j == 1) {
+    morg[, hours := uhourse]
+  } else {
+    morg[, hours := hourslw]
+  }
+  if(j %in% 1:3) {
+    morg[, wage := earnhre / 100]
+    morg[paidhre == 'No', wage := earnwke / hourslw]
+  } else {
+    morg[, wage := earnwke / hours]
+    morg[is.na(wage) & paidhre == 'Yes', wage := earnhre / 100]
+  }
+  
+  morg$hrly.earn <- log(morg$wage)
+  morg$wkly.earn <- log(morg$wage * morg$hours)
+  
+  
+  # DEFINE education and experience
+  # --- could do second assignment of education by other subcategories
+  morg[(grade92) %in% 31:38, educ := 1]
+  morg[(grade92)  ==  39, educ := 2]
+  morg[(grade92) %in% 40:42, educ := 3]
+  morg[(grade92)  ==  43, educ := 4]
+  morg[(grade92) %in% 44:46, educ := 5]
+  
+  morg$exp <- morg$grade92
+  morg$exp <- plyr::mapvalues(as.numeric(morg$exp),
+                              31:46,
+                              c(1, 3, 5.5, 7.5, 9, 10, 11, 12, 12, 14, 14, 14, 16, 18, 20, 20))
+  morg$exp <- morg$age - morg$exp
+  
+  # see label.table$state for states list
+  morg[state %in% 11:23, region := 1]
+  morg[state %in% 31:47, region := 2]
+  morg[state %in% 51:74, region := 3]
+  morg[state %in% 81:95, region := 4]
+  morg$region <- factor(morg$region, 1:4, labels = c('northeast', 'midwest', 'south', 'west'))
+  # can be checked with table(morg$region, morg$state)
+  
+  # try both PREFERRING usual hours work and PREFERRING last week
+  
+  morg <- morg[!is.infinite(morg$wkly.earn)]
+  morg <- morg[!is.infinite(morg$hrly.earn)]
+  
+  morg.data[[j]] <- morg
+
+  if (j == 1) {
+    a <- NULL
+    b <- NULL
+  }
+  
+  sector.names <- c('AGR', 'MIN', 'UTL', 'CON', 'MAN', 'WHO', 'RET', 'TRA', 'INF', 'FIN', 
+                    'RLE', 'SRV', 'MGM', 'ADM', 'EDU', 'HLT', 'ART', 'ACC', 'OTH', 'PUB')
+ 
+  aa <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = morg.data[[j]], weights = earnwt*hours)
+  if(j==3) aa <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = morg.data[[j]], weights = weight*hours)
+  a[[j]] <- aa$coefficients[2:20]
+  
+  bb <- lm(wkly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = morg.data[[j]], weights = earnwt*hours)
+  if(j==3) bb <- lm(wkly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = morg.data[[j]], weights = weight*hours)
+  b[[j]] <- bb$coefficients[2:20] 
+}
+rm(aa, bb)
+```
+
+
+## Introduction
+
+Figure 6b in *Ranking Firms Using Revealed Preference* shows that sector-level nonpay job characteristics correspond well with intuitions about working conditions, but it does not consider differences in work hours between different firms. ``How do these sectoral measures of compensating differentials compare to measures of weekly hours worked? What happens if we adjust for weekly hours worked differences?'' To find out we follow Autor, Katz and Kearney [-@akk] and compare hourly, weekly, and annual earnings. 
+
+## MORG: all months of CPS
+
+First we compare hourly and weekly earnings from the Merged Outgoing Rotation Groups for 2001-2007.[^1] We have to make choices for three variables: 
+
+* prefer weekly earnings `earnwke` (the higher response between "How much do you usually earn per week at your main job?" and usual weekly hours multiplied by hourly wage) or hourly earnings `earnhre` ("What is your hourly rate of pay on this job, excluding overtime pay, tips, or commission?")
+* prefer hours last week `hourslw` ("Last week, how many hours did you actually work at your main job?") or usual weekly hours `uhourse` ("How many hours per week do you usually work at your main job?")
+* choose `weight` (relates to most variables) or `earnwt` (for earnings) for regression weighting. IPUMS documentation states that "EARNWT is a person-level weight that should be used in any analysis including one of the following variables: EARNWEEK [`earnwke`], HOURWAGE [`earnhre`], PAIDHOUR [`paidhre`]." We try both weights and see little difference.
+
+[^1]: Recall that respondents are interviewed for four months, left alone for eight months, then interviewed for another four months. They are asked questions about income in only two of those eight interview months, the fourth and eighth (hence ``outgoing''). Therefore the MORG includes data for all months of the year.
+
+#### Cleaning steps
+* sectors are identified by the 2002 NAICS code
+* restrict to individuals between ages 18 and 61
+* topcoded weekly earnings are multiplied by 1.5
+* hourly earnings less than $3.80 or greater than 1/35 of the topcode are dropped
+* weekly earnings of zero are dropped
+* AKK: ``earnings weights, equal to the product of CPS sampling weights and hours [worked in the prior week] are used''
+* allocated observations are dropped
+* education is split into five categories (less than high school diploma, high school diploma, some college, bachelor's degree, greater than bachelor's)
+* experience is age less the expected years of schooling (for example, every respondent coded to have received between 6 and 8 years of school is assigned experience as age minus 7)
+
+#### Data exploration
+
+In the cross-tabulation for hours, one can see that in general either both are present or both are missing but `hourslw` has a slightly lower nonreporting rate. This is consistent with AKK. 
+
+```{r hours, results='asis'}
+# uhourse on rows, hourslw on columns
+as.matrix(table(!is.na(morg$uhourse), !is.na(morg$hourslw)) / dim(morg)[1]) %>% 
+  `colnames<-`(., c('missing', 'present')) %>% 
+  `rownames<-`(., c('missing', 'present')) %>% 
+  xtable::xtable(digits=3, align='c|cc') %>% 
+  xtable::print.xtable(hline.after = 0, comment = F)
+```
+
+Table 1 summarizes hours worked per week by industry. Notice there is more dispersion in the distribution of `hourslw` than `usuhours`, but both are similar across sectors.
+
+```{r hours2}
+cbind(plyr::ddply(morg, ~sector, summarize, 
+                  `$\\bar{h}_u$`= round(mean(uhourse, na.rm = T),1), 
+                  `$\\sigma_u$`=round(sd(uhourse, na.rm = T),1)), 
+      plyr::ddply(morg, ~sector, summarize, 
+                  `$\\bar{h}_{lw}$`=round(mean(hourslw, na.rm = T),1), 
+                  `$\\sigma_{lw}$`=round(sd(hourslw, na.rm = T),1)))[-21,-4] %>%
+  knitr::kable(caption = "A comparison of two measures of hours worked 
+               per week by industry: usual hours worked per week ($\\bar{h}_{u}$) 
+               and hours worked last week ($\\bar{h}_{lw}$).")
+
+```
+
+#### Regressions 
+
+We estimate sector effects on weekly and hourly earnings following the specification in AKK
+\[
+y_i = \psi_i\beta_1 + X_i\beta_2+\varepsilon_i
+\]
+where $y_i$ are hourly or weekly earnings for individual $i$ in sector $\psi$. The covariates matrix $X_i$ includes education, a quartic in experience, sex, region, race, and the interaction of education with a quartic in experience. Regressions are weighted according to CPS sampling weights and hours worked. We estimate this pair of regressions four times for each modification of the dataset. Each pair of regressions yields a pair of sector coefficients that we compare.
+
+Regressions of sector coefficients of weekly earnings on those of hourly earnings show that less than ten percent of the variation in weekly earnings across sectors is explained by differences in hours worked across sectors. These are shown in Figure 1. We tested this with a few different combinations of choices in reported earnings, reported hours worked, and sampling weights. In general, we prefer to use `hourslw` as in AKK, but we test the *usual hours worked* variable once. Choice of weights does not make much of a difference.
+
+\vspace{.25in}
+
+
+```{r plots, fig.cap="The top left plot uses *hours last week* for the hours variable of the calculations, and the top right plot uses *usual hours worked*. Both use reported hourly earnings for hourly workers. Weekly earnings are calculated from hourly earnings and the chosen hours measure. The bottom left plot attempts to use standard weights instead of earnings weights. There is no apparent change. In the bottom right plot, we use weekly earnings unless respondents are missing this value *and* indicate that they are paid by the hour (`paidhre == 1`). All plots indicate the value $1-R^2$ in the top left indicating the percent of variation across sectors in weekly earnings that is explained by variation in hours worked per week.", fig.height = 7, echo = F}
+
+Rcpp::sourceCpp('src/repel_boxes.cpp')
+#source('R/RcppExports.R')
+library(grid)
+
+par(mfrow = c(2,2))
+variance <- NULL
+for(j in 1:4){
+  if (j == 1) {
+    par(mar = c(0,4,4,0))
+    xaxt = "n"
+    yaxt = "s"
+  } else if (j == 2) {
+    par(mar = c(0,0,4,4))
+    xaxt = "n"
+    yaxt = "n"
+  } else if (j == 3) {
+    par(mar = c(4,4,0,0))
+    xaxt = "s"
+    yaxt = "s"
+  } else if (j == 4) {
+    par(mar = c(4,0,0,4))
+    yaxt = "n"
+    xaxt = "s" }
+  
+  plot(a[[j]], b[[j]], xlab = "hourly earnings", ylab = "weekly earnings", 
+       ylim = c(-.2, .75), xlim = c(0,.8), xaxt = xaxt, yaxt = yaxt)
+  abline(lm(b[[j]]~a[[j]]), col = 'gray')
+  text(.1,.7, signif(1 - summary(lm(a[[j]] ~ b[[j]]))$r.squared,2))
+  
+  aa <- a[[j]]
+  bb <- b[[j]]
+  
+  vps <- gridBase::baseViewports()
+  pushViewport(vps$inner, vps$figure, vps$plot)
+  point_padding_x = convertWidth(unit(1e-6, "lines"), "native", valueOnly = T)
+  point_padding_y = convertHeight(unit(1e-6, "lines"), "native", valueOnly = T)
+  box_padding_x <- convertWidth(unit(0, "lines"), "native", valueOnly = T)
+  box_padding_y <- convertHeight(unit(0, "lines"), "native", valueOnly = T)
+  boxes <- lapply(1:length(sector.names), function(i) {
+    gw <- convertWidth(unit(3, "char"), "native", valueOnly = T)/4
+    gh <- convertHeight(unit(3, "char"), "native", valueOnly = T)/4
+    c(
+      "x1" = aa[i] - gw - box_padding_x,
+      "y1" = bb[i] - gh - box_padding_y,
+      "x2" = aa[i] + gw + box_padding_x,
+      "y2" = bb[i] + gh + box_padding_y
+    )
+  })
+  
+  set.seed(stats::rnorm(328))
+  repel <- repel_boxes(
+    data_points = cbind(aa,bb), 
+    point_padding_x = point_padding_x,
+    point_padding_y = point_padding_y,
+    boxes = do.call(rbind, boxes),
+    xlim = range(vps$plot$xscale),
+    ylim = range(vps$plot$yscale),
+    force = 1 * 1e-6,
+    maxiter = 2000
+  )
+  
+  text(repel[[1]], as.vector(repel[[2]]), sector.names[-13], cex = .5)
+  
+  gw <- convertWidth(unit(3, "char"), "native", valueOnly = T)/4
+  gh <- convertHeight(unit(3, "char"), "native", valueOnly = T)/4
+  sapply(1:19, function(x) {
+    intersect_line_rectangle(
+      c(aa[x], bb[x]),
+      c(repel[x,1], repel[x,2]),
+      c(repel[x,1]-gw/2, repel[x,2]-gh/2, repel[x,1]+gw/2, repel[x,2]+gh/2)
+    )
+  }) %>% 
+    t() -> to
+  
+  gw <- convertWidth(unit(6, "point"), "native", valueOnly = T) / 2
+  gh <- convertHeight(unit(6, "point"), "native", valueOnly = T) / 2
+  sapply(1:19, function(x) {
+    intersect_line_rectangle(
+      c(repel[x,1], repel[x,2]),
+      c(aa[x], bb[x]),
+      c(aa[x]-gw, bb[x]-gh, aa[x]+gw, bb[x]+gh)
+    )
+  }) %>% 
+    t() -> from
+  
+  segments(from[,1],from[,2],to[,1], to[,2], col = 'dodgerblue2')
+  popViewport(2)
+}
+
+```
+
+
+
+## ASEC: March CPS
+
+```{r asec data, echo = F}
+rm(morg)
+
+source('pull_data_asec.R');
+sector.names <- c('MIN', 'UTL', 'CON', 'MAN', 'WHO', 'RET', 'TRA', 'INF', 
+                  'FIN', 'RLE', 'SRV', 'MGM', 'ADM', 'EDU', 'HLT', 'ART', 'ACC', 'OTH', 'PUB')
+
+```
+
+We then repeat the same exercise with the March CPS to control for weeks worked during the year.[^2] First we create a table showing the means and standard deviations of the number of weeks worked per year. 
+
+[^2]: We exclude 2001 and 2002 data because industry classifications are not consistent with the 2002 NAICS. The BLS published extracts of the CPS basic data with revised industry classifications for the 2000 and 2001 CPS basic monthly files, but not for the ASEC. It should be possible to merge these revised industry records into the ASEC since respondents are asked the ASEC supplement questions in addition to the basic CPS questions. However, when we attempted this merge, there were zero matches. We didn't explore further.
+
+```{r weeks}
+cbind(plyr::ddply(asec, ~sector, summarize, 
+                  `$\\bar{w}_u$`= round(mean(wkswork, na.rm = T),1), 
+                  `$\\sigma$`=round(sd(wkswork, na.rm = T),1)))[-21,] %>% 
+      knitr::kable(caption = "Weeks worked per year by industry.")
+```
+
+Next we repeat the exercise of creating four plots and see again that only a small percentage of the variation in hourly earnings comes from hours and weeks worked. The number in the upper left of each plot shows $1-R^2$ of the regression, giving the percent of the variation explained by differences in hours across industries. Together these three plots show a bit of difference from the plots based on the MORG, probably because they limit to the month of March and are made using smaller samples. Nevertheless they continue to show that little of the variation is caused by differences in working hours among sectors. 
+
+The reason to employ the ASEC rather than the MORG is to understand a difference when including usual weeks worked per year. The bottom right figure shows this. As expected, a slightly larger percentage of the variation in yearly earnings across sectors is explained by hours worked over the year, but that amount is still quite small. 
+
+```{r labelFunction, echo = F}
+
+secLabels <- function(a, b) {
+  vps <- gridBase::baseViewports()
+  pushViewport(vps$inner, vps$figure, vps$plot)
+  point_padding_x = convertWidth(unit(1e-6, "lines"), "native", valueOnly = T)
+  point_padding_y = convertHeight(unit(1e-6, "lines"), "native", valueOnly = T)
+  box_padding_x <- convertWidth(unit(0, "lines"), "native", valueOnly = T)
+  box_padding_y <- convertHeight(unit(0, "lines"), "native", valueOnly = T)
+  boxes <- lapply(1:length(sector.names), function(i) {
+    gw <- convertWidth(unit(3, "char"), "native", valueOnly = T)/4
+    gh <- convertHeight(unit(3, "char"), "native", valueOnly = T)/4
+    c(
+      "x1" = a[i] - gw - box_padding_x,
+      "y1" = b[i] - gh - box_padding_y,
+      "x2" = a[i] + gw + box_padding_x,
+      "y2" = b[i] + gh + box_padding_y
+    )
+  })
+  
+  set.seed(stats::rnorm(328))
+  repel <- repel_boxes(
+    data_points = cbind(a,b), 
+    point_padding_x = point_padding_x,
+    point_padding_y = point_padding_y,
+    boxes = do.call(rbind, boxes),
+    xlim = range(vps$plot$xscale),
+    ylim = range(vps$plot$yscale),
+    force = 1 * 1e-6,
+    maxiter = 2000
+  )
+  
+  text(repel[[1]], as.vector(repel[[2]]), sector.names, cex = .5)
+  
+  gw <- convertWidth(unit(3, "char"), "native", valueOnly = T)/4
+  gh <- convertHeight(unit(3, "char"), "native", valueOnly = T)/4
+  sapply(1:19, function(x) {
+    intersect_line_rectangle(
+      c(a[x], b[x]),
+      c(repel[x,1], repel[x,2]),
+      c(repel[x,1]-gw/2, repel[x,2]-gh/2, repel[x,1]+gw/2, repel[x,2]+gh/2)
+    )
+  }) %>% 
+    t() -> to
+  
+  gw <- convertWidth(unit(6, "point"), "native", valueOnly = T) / 2
+  gh <- convertHeight(unit(6, "point"), "native", valueOnly = T) / 2
+  sapply(1:19, function(x) {
+    intersect_line_rectangle(
+      c(repel[x,1], repel[x,2]),
+      c(a[x], b[x]),
+      c(a[x]-gw, b[x]-gh, a[x]+gw, b[x]+gh)
+    )
+  }) %>% 
+    t() -> from
+  
+  segments(from[,1],from[,2],to[,1], to[,2], col = 'dodgerblue2')
+  popViewport(2)
+
+}
+
+```
+
+```{r asec.plots, echo=F, fig.height=7, eval=T, fig.cap='Annual versus hourly earnings. The top left plot uses *hours worked last week*, the top right plot uses *usual hours*. The bottom left plot uses usual hours, and it includes weekly earnings unless respondents state that they are paid by the hour. It should be and is identical to the top right plot. These first three plots are included for comparison with the results from the MORG and to have a basis from which to compare the fourth plot. The bottom right plot utilizes a question from the ASEC to compare hourly earnings with *annual earnings* across industries.', results = 'hide'}
+Rcpp::sourceCpp('src/repel_boxes.cpp')
+
+par(mfrow = c(2,2))
+xlim <- c(-.25, .35)
+ylim <- c(-.35, .35)
+
+par(mar=c(4.1,4.1,2.1,1.1))
+# keep lower nonreport rate: hours last week
+asec[, hrs := hrslw]
+asec[, wage := hrearn]
+asec[is.na(hrearn) & paidhre == 'No', wage := wkearn/hrs]
+asec$hrly.earn <- log(asec$wage)
+asec$wkly.earn <- log(asec$wage * asec$hrs)
+a <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+a <- a$coefficients[2:20]
+b <- lm(wkly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+b <- b$coefficients[2:20]
+plot(a, b, xlab = "hourly earnings", ylab = "weekly earnings", ylim = ylim, xlim = xlim, xaxt = "s")
+axis(side = 2, labels = T)
+abline(lm(b~a), col = 'gray')
+text(min(a), max(b), round(1 - summary(lm(a ~ b))$r.squared,3))
+secLabels(a,b)
+
+# when you use usual hours, 2% less variation is explained by hours, but this is largely because there is less variation to explain
+asec[, hrs := uslhrs]
+asec[, wage := hrearn]
+asec[is.na(hrearn), wage := wkearn/hrs]
+asec$hrly.earn <- log(asec$wage)
+asec$wkly.earn <- log(asec$wage * asec$hrs)
+a <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+a <- a$coefficients[2:20]
+b <- lm(wkly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+b <- b$coefficients[2:20]
+plot(a, b, xlab = "hourly earnings", ylab = "weekly earnings", ylim = ylim, xlim = xlim, yaxt = "s", xaxt = "s")
+abline(lm(b~a), col = 'gray')
+text(min(a), max(b), round(1 - summary(lm(a ~ b))$r.squared,3))
+secLabels(a,b)
+
+# asec[paidhre == 'No', wage := earnwke / hourslw]
+
+# another option is to use weekly wages
+asec[, wage := wkearn / hrs]
+asec[is.na(wage) & paidhre == 'Yes', wage := hrearn]
+asec$hrly.earn <- log(asec$wage)
+asec$wkly.earn <- log(asec$wage * asec$hrs)
+a <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+a <- a$coefficients[2:20]
+b <- lm(wkly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+b <- b$coefficients[2:20]
+plot(a, b, xlab = "hourly earnings", ylab = "weekly earnings", ylim = ylim, xlim = xlim)
+abline(lm(b~a), col = 'gray')
+text(min(a), max(b), round(1 - summary(lm(a ~ b))$r.squared,3))
+secLabels(a,b)
+
+# then compare annual earnings
+asec[, hrs := hrslw]
+asec[, wage := hrearn]
+asec[paidhre == 'No', wage := wkearn/hrs]
+asec$hrly.earn <- log(asec$wage)
+asec$annu.earn <- log(asec$wage * asec$hrs * asec$wkswork)
+a <- lm(hrly.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+a <- a$coefficients[2:20]
+b <- lm(annu.earn ~ sector + educ + exp^4 + sex + region + race + exp^4*educ, data = asec, weights = ernlwt*hrs)
+b <- b$coefficients[2:20]
+plot(a, b, xlab = "hourly earnings", ylab = "annual earnings", ylim = ylim, xlim = xlim, yaxt = "s")
+abline(lm(b~a), col = 'gray')
+text(min(a), max(b), round(1 - summary(lm(a ~ b))$r.squared,3))
+secLabels(a,b)
+
+
+```
+
+[//]: # -->
+
+
+
+## References
+
